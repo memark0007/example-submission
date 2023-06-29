@@ -12,6 +12,7 @@ const app = express()
 
 // Database connection
 const sequelize = require('./database');
+//{ force: true }
 sequelize.sync().then(() => {
   console.log("Connected to database");
 }).catch((error) => {
