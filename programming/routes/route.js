@@ -1,22 +1,24 @@
 const express = require('express');
 
 // Import models
-const User = require('../models/Users');
-const Cryptocurrency = require('../models/Cryptocurrencies');
-const UserCryptoBalance = require('../models/UserCryptoBalances');
-const Transaction = require('../models/Transactions');
-const ExchangeRate = require('../models/ExchangeRates');
+const Users = require('../models/Users');
+const Cryptocurrencies = require('../models/Cryptocurrencies');
+const UserCryptoBalances = require('../models/UserCryptoBalances');
+const Transactions = require('../models/Transactions');
+const ExchangeRates = require('../models/ExchangeRates');
 
 const bcrypt = require('bcrypt');
 
-const { Sequelize } = require('sequelize');
+const { Sequelize, DataTypes } = require('sequelize');
+const sequelize = require('../database'); 
+
 
 const router = express.Router();
 
 // Middleware to check if user is an admin
 const checkAdmin = async (req, res, next) => {
   const { username } = req.body;
-  const user = await User.findByPk(username); // Assumes you have some way of getting the logged-in user's ID
+  const user = await Users.findByPk(username); // Assumes you have some way of getting the logged-in user's ID
   // console.log(userId, user)
 
   if (user && user.isAdmin) {
@@ -29,65 +31,113 @@ const checkAdmin = async (req, res, next) => {
 // Fetch a user's balance
 router.get('/users/:id/balance', async (req, res) => {
   try {
-    const userCryptoBalance = await UserCryptoBalance.findAll({ where: { userId: req.params.id }});
+    const userCryptoBalance = await UserCryptoBalances.findAll({ where: { userId: req.params.id }});
     res.json(userCryptoBalance);
   } catch (error) {
     res.status(500).json({ error: error.toString() });
   }
 });
 
-// Transfer cryptocurrencies from one user to another
-router.post('/users/:id/transfer', async (req, res) => {
+// Transfer cryptocurrency to another user
+router.post('/users/:username/transfer', async (req, res) => {
+  const t = await sequelize.transaction();
+
   try {
-    const { toUserId, exchangeId, amount } = req.body;
-    const transaction = await Transaction.create({
-      fromUserId: req.params.id,
-      toUserId,
-      exchangeId,
-      amount
-    });
-    // Also update the balance of both users in the UserCryptoBalance table here
-    res.json(transaction);
+    const { toUsername, fromCryptoId, toCryptoId, amount } = req.body;
+    const fromUser = await Users.findOne({ where: { username: req.params.username } }, { transaction: t });
+    const toUser = await Users.findOne({ where: { username: toUsername } }, { transaction: t });
+
+    if (fromUser && toUser) {
+      const fromUserBalance = await UserCryptoBalances.findOne({ where: { userId: fromUser.username, cryptoId: fromCryptoId } }, { transaction: t });
+      if (fromUserBalance && fromUserBalance.balance >= amount) {
+        const exchangeRate = await ExchangeRates.findOne({ where: { fromCryptoId, toCryptoId } }, { transaction: t });
+        if (exchangeRate) {
+          const receivedAmount = amount * exchangeRate.rate;
+
+          await Transactions.create({
+            fromUserId: fromUser.username,
+            toUserId: toUser.username,
+            fromCryptoId,
+            toCryptoId,
+            sentAmount: amount,
+            rate: exchangeRate.rate,
+            receivedAmount
+          }, { transaction: t });
+
+          fromUserBalance.balance -= amount;
+          await fromUserBalance.save({ transaction: t });
+
+          const toUserBalance = await UserCryptoBalances.findOne({ where: { userId: toUser.username, cryptoId: toCryptoId } }, { transaction: t });
+          if (toUserBalance) {
+            toUserBalance.balance += receivedAmount;
+            await toUserBalance.save({ transaction: t });
+          } else {
+            await UserCryptoBalances.create({ userId: toUser.username, cryptoId: toCryptoId, balance: receivedAmount }, { transaction: t });
+          }
+
+          await t.commit();
+          res.json({ success: true, message: 'Transfer successful' });
+        } else {
+          await t.rollback();
+          res.status(400).json({ error: 'Exchange rate not found' });
+        }
+      } else {
+        await t.rollback();
+        res.status(400).json({ error: 'Insufficient balance' });
+      }
+    } else {
+      await t.rollback();
+      res.status(400).json({ error: 'User not found' });
+    }
+  } catch (error) {
+    await t.rollback();
+    res.status(500).json({ error: error.toString() });
+  }
+});
+
+module.exports = router;
+
+// Fetch total balances for all cryptocurrencies
+router.get('/admin/balances', checkAdmin, async (req, res) => {
+  try {
+    const result = await sequelize.query(`
+      SELECT  c.symbol, SUM(uc.balance) AS total
+      FROM UserCryptoBalances AS uc
+      JOIN Cryptocurrencies AS c ON uc.cryptoId = c.symbol
+      GROUP BY c.symbol
+    `, { type: Sequelize.QueryTypes.SELECT });
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.toString() });
   }
 });
 
-// Fetch total balances for all cryptocurrencies
-router.get('/admin/balances', checkAdmin, async (req, res) => {
-  try {
-    const balances = await UserCryptoBalance.findAll({
-      attributes: ['cryptoId', [Sequelize.fn('sum', Sequelize.col('balance')), 'total']]
-    });
-    res.json(balances);
-  } catch (error) {
-    res.status(500).json({ error: error.toString() });
-  }
-});
+
+
 
 
 
 // Increase or decrease a user's balance
 router.put('/admin/users/balance', checkAdmin, async (req, res) => {
   try {
-    const { username, userId , toCryptoId, balance } = req.body;
+    const { username, userId , toCryptoId, addBalance } = req.body;
     
-    console.log(username, userId , toCryptoId, balance)
-    let userCryptoBalance = await UserCryptoBalance.findOne({ where: { userId: userId, cryptoId: toCryptoId } });
+    // console.log(username, userId , toCryptoId, addBalance)
+    let userCryptoBalance = await UserCryptoBalances.findOne({ where: { userId: userId, cryptoId: toCryptoId } });
     console.log(userCryptoBalance)
 
     if (!userCryptoBalance) {
       // If the user doesn't have a balance for the cryptocurrency, create a new document
-      userCryptoBalance = new UserCryptoBalance({ userId: userId, cryptoId: toCryptoId, balance: balance });
+      userCryptoBalance = new UserCryptoBalances({ userId: userId, cryptoId: toCryptoId, balance: addBalance });
     } else {
       // If the user does have a balance for the cryptocurrency, adjust the existing balance
-      userCryptoBalance.balance += balance;
+      userCryptoBalance.balance += addBalance;
     }
 
     // Save the updated (or new) balance
     await userCryptoBalance.save();
 
-    res.json({ success: true, balance: userCryptoBalance.balance });
+    res.json({ success: true, addBalance: userCryptoBalance.balance });
   } catch (error) {
     res.status(500).json({ error: error.toString() });
   }
@@ -97,7 +147,7 @@ router.put('/admin/users/balance', checkAdmin, async (req, res) => {
 router.post('/admin/currencies/add', checkAdmin, async (req, res) => {
   try {
     const { symbol } = req.body;
-    const currency = await Cryptocurrency.create({ symbol });
+    const currency = await Cryptocurrencies.create({ symbol });
     res.json(currency);
   } catch (error) {
     res.status(500).json({ error: error.toString() });
@@ -108,7 +158,7 @@ router.post('/admin/currencies/add', checkAdmin, async (req, res) => {
 router.put('/admin/exchangeRate/upsert', checkAdmin, async (req, res) => {
   try {
     const { fromCryptoId, toCryptoId, rate } = req.body;
-    const exchangeRate = await ExchangeRate.upsert({
+    const exchangeRate = await ExchangeRates.upsert({
       fromCryptoId,
       toCryptoId,
       rate
@@ -125,7 +175,7 @@ router.post('/user/create', async (req, res) => {
   try {
     const { username, isAdmin, password  } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10); 
-    const user = await User.create({ 
+    const user = await Users.create({ 
       username,  
       password: hashedPassword,
       isAdmin
