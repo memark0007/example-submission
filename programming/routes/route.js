@@ -28,15 +28,6 @@ const checkAdmin = async (req, res, next) => {
   }
 };
 
-// Fetch a user's balance
-router.get('/users/:id/balance', async (req, res) => {
-  try {
-    const userCryptoBalance = await UserCryptoBalances.findAll({ where: { userId: req.params.id }});
-    res.json(userCryptoBalance);
-  } catch (error) {
-    res.status(500).json({ error: error.toString() });
-  }
-});
 
 // Transfer cryptocurrency to another user
 router.post('/users/:username/transfer', async (req, res) => {
@@ -111,10 +102,6 @@ router.get('/admin/balances', checkAdmin, async (req, res) => {
     res.status(500).json({ error: error.toString() });
   }
 });
-
-
-
-
 
 
 // Increase or decrease a user's balance
